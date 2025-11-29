@@ -1,10 +1,11 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { MapPin, CreditCard, Truck, ArrowLeft, Printer, CheckCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { toast } from 'sonner'
 import AddressAutocomplete, { parseGooglePlace } from '@/components/AddressAutocomplete'
+import { supabase } from '@/lib/supabase'
 import { 
   getShippingRates, 
   createShipment,
@@ -72,6 +73,55 @@ export default function CheckoutPage() {
   
   // Confirmation state
   const [shipment, setShipment] = useState<ShipmentResponse | null>(null)
+  
+  // User email for notifications
+  const [userEmail, setUserEmail] = useState<string | null>(null)
+  
+  // Get user email on mount
+  useEffect(() => {
+    const getUserEmail = async () => {
+      const { data: { user } } = await supabase.auth.getUser()
+      if (user?.email) {
+        setUserEmail(user.email)
+      }
+    }
+    getUserEmail()
+  }, [])
+  
+  // Send order confirmation email
+  const sendOrderConfirmationEmail = async (shipmentResult: ShipmentResponse) => {
+    if (!userEmail) {
+      console.log('No user email available for notification')
+      return
+    }
+    
+    try {
+      const { error } = await supabase.functions.invoke('send-email', {
+        body: {
+          to: userEmail,
+          template: 'order_confirmation',
+          data: {
+            customerName: pickupAddress.contactName || 'Golfer',
+            orderNumber: shipmentResult.shipmentId,
+            trackingNumber: shipmentResult.trackingNumber,
+            carrier: shipmentResult.carrier,
+            estimatedDelivery: shipmentResult.estimatedDelivery,
+            deliveryAddress: `${deliveryAddress.street}, ${deliveryAddress.city}, ${deliveryAddress.state} ${deliveryAddress.postalCode}`,
+            items: [{ name: 'Golf Equipment Shipment', quantity: 1 }]
+          }
+        }
+      })
+      
+      if (error) {
+        console.error('Failed to send confirmation email:', error)
+      } else {
+        console.log('Order confirmation email sent successfully')
+      }
+    } catch (err) {
+      console.error('Error sending confirmation email:', err)
+      // Don't throw - email failure shouldn't break the checkout flow
+    }
+  }
 
   // Handle address autocomplete selection
   const handlePickupChange = useCallback((value: string, place?: PlaceResult) => {
@@ -208,6 +258,9 @@ export default function CheckoutPage() {
       setShipment(shipmentResult)
       setStep('confirmation')
       toast.success('Shipment created successfully!')
+      
+      // Send order confirmation email (non-blocking)
+      sendOrderConfirmationEmail(shipmentResult)
     } catch (error) {
       console.error('Error processing payment:', error)
       // For demo, create mock shipment
@@ -223,6 +276,9 @@ export default function CheckoutPage() {
       setShipment(mockShipment)
       setStep('confirmation')
       toast.success('Shipment created (demo mode)')
+      
+      // Send order confirmation email (non-blocking)
+      sendOrderConfirmationEmail(mockShipment)
     } finally {
       setIsLoading(false)
     }
