@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { Bell, Check, Package, Truck, AlertTriangle, CheckCircle } from 'lucide-react';
-import { notificationService, Notification } from '../services/notificationService';
+import { notificationService, type Notification as AppNotification } from '../services/notificationService';
 
 const NotificationBell = () => {
-  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [isOpen, setIsOpen] = useState(false);
   const [loading, setLoading] = useState(false);
