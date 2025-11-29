@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Rocket, MapPin, Weight, Clock, Zap, Target, Package } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -6,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { toast } from 'sonner'
 
 export default function LandingPage() {
+  const navigate = useNavigate()
   const [formData, setFormData] = useState({
     pickup: '',
     dropoff: '',
@@ -15,8 +17,17 @@ export default function LandingPage() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    console.log('Booking data:', formData)
-    toast.success('Launch sequence initiated! Your gear is on its way to the stars.')
+    if (!formData.pickup || !formData.dropoff) {
+      toast.error('Please enter pickup and delivery locations')
+      return
+    }
+    const params = new URLSearchParams({
+      pickup: formData.pickup,
+      dropoff: formData.dropoff,
+      weight: formData.weight || 'medium',
+      teeTime: formData.teeTime
+    })
+    navigate(`/checkout?${params.toString()}`)
   }
 
   const scrollToBooking = () => {

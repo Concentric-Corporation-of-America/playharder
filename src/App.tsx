@@ -4,6 +4,7 @@ import { Toaster } from 'sonner'
 import LandingPage from './pages/LandingPage'
 import LoginPage from './pages/LoginPage'
 import DashboardPage from './pages/DashboardPage'
+import CheckoutPage from './pages/CheckoutPage'
 import './App.css'
 
 const queryClient = new QueryClient()
@@ -16,6 +17,7 @@ function App() {
           <Route path="/" element={<LandingPage />} />
           <Route path="/login" element={<LoginPage />} />
           <Route path="/dashboard" element={<DashboardPage />} />
+          <Route path="/checkout" element={<CheckoutPage />} />
         </Routes>
         <Toaster position="top-right" richColors />
       </Router>
