@@ -1,21 +1,37 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Rocket, Mail, Lock, Eye, EyeOff } from 'lucide-react'
+import { Rocket, Mail, Lock, Eye, EyeOff, ArrowLeft } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { toast } from 'sonner'
 import { supabase } from '@/lib/supabase'
+
+type AuthStep = 'credentials' | 'otp-verification'
 
 export default function LoginPage() {
   const navigate = useNavigate()
   const [isLoading, setIsLoading] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
   const [isSignUp, setIsSignUp] = useState(false)
+  const [authStep, setAuthStep] = useState<AuthStep>('credentials')
+  const [otpCode, setOtpCode] = useState(['', '', '', '', '', ''])
+  const otpInputRefs = useRef<(HTMLInputElement | null)[]>([])
   const [formData, setFormData] = useState({
     email: '',
     password: '',
     confirmPassword: ''
   })
+
+  // Check if user is already logged in
+  useEffect(() => {
+    const checkUser = async () => {
+      const { data: { user } } = await supabase.auth.getUser()
+      if (user) {
+        navigate('/dashboard')
+      }
+    }
+    checkUser()
+  }, [navigate])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -29,13 +45,20 @@ export default function LoginPage() {
           return
         }
 
+        // Sign up with OTP - Supabase will send a verification email
         const { error } = await supabase.auth.signUp({
           email: formData.email,
           password: formData.password,
+          options: {
+            emailRedirectTo: `${window.location.origin}/dashboard`
+          }
         })
 
         if (error) throw error
-        toast.success('Check your email for the verification link!')
+        
+        // Move to OTP verification step
+        setAuthStep('otp-verification')
+        toast.success('Verification code sent to your email!')
       } else {
         const { error } = await supabase.auth.signInWithPassword({
           email: formData.email,
@@ -48,6 +71,84 @@ export default function LoginPage() {
       }
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : 'An error occurred'
+      toast.error(errorMessage)
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const handleOtpChange = (index: number, value: string) => {
+    // Only allow numbers
+    if (value && !/^\d$/.test(value)) return
+
+    const newOtp = [...otpCode]
+    newOtp[index] = value
+    setOtpCode(newOtp)
+
+    // Auto-focus next input
+    if (value && index < 5) {
+      otpInputRefs.current[index + 1]?.focus()
+    }
+  }
+
+  const handleOtpKeyDown = (index: number, e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Backspace' && !otpCode[index] && index > 0) {
+      otpInputRefs.current[index - 1]?.focus()
+    }
+  }
+
+  const handleOtpPaste = (e: React.ClipboardEvent) => {
+    e.preventDefault()
+    const pastedData = e.clipboardData.getData('text').slice(0, 6)
+    if (/^\d+$/.test(pastedData)) {
+      const newOtp = pastedData.split('').concat(Array(6 - pastedData.length).fill(''))
+      setOtpCode(newOtp.slice(0, 6))
+      // Focus the last filled input or the next empty one
+      const focusIndex = Math.min(pastedData.length, 5)
+      otpInputRefs.current[focusIndex]?.focus()
+    }
+  }
+
+  const handleVerifyOtp = async () => {
+    const code = otpCode.join('')
+    if (code.length !== 6) {
+      toast.error('Please enter the complete 6-digit code')
+      return
+    }
+
+    setIsLoading(true)
+    try {
+      const { error } = await supabase.auth.verifyOtp({
+        email: formData.email,
+        token: code,
+        type: 'signup'
+      })
+
+      if (error) throw error
+      
+      toast.success('Account verified! Welcome aboard!')
+      navigate('/dashboard')
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Invalid verification code'
+      toast.error(errorMessage)
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const handleResendOtp = async () => {
+    setIsLoading(true)
+    try {
+      const { error } = await supabase.auth.resend({
+        type: 'signup',
+        email: formData.email,
+      })
+
+      if (error) throw error
+      toast.success('New verification code sent!')
+      setOtpCode(['', '', '', '', '', ''])
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Failed to resend code'
       toast.error(errorMessage)
     } finally {
       setIsLoading(false)
@@ -67,6 +168,105 @@ export default function LoginPage() {
       const errorMessage = error instanceof Error ? error.message : 'An error occurred'
       toast.error(errorMessage)
     }
+  }
+
+  const handleBackToCredentials = () => {
+    setAuthStep('credentials')
+    setOtpCode(['', '', '', '', '', ''])
+  }
+
+  // OTP Verification Modal
+  if (authStep === 'otp-verification') {
+    return (
+      <div className="min-h-screen flex items-center justify-center px-4">
+        {/* Background blur overlay */}
+        <div className="absolute inset-0 bg-cosmic-darker/80 backdrop-blur-sm" />
+        
+        {/* Background stars effect */}
+        <div className="absolute inset-0 overflow-hidden pointer-events-none">
+          <div className="absolute top-20 left-10 w-2 h-2 bg-white rounded-full opacity-50 animate-pulse" />
+          <div className="absolute top-40 right-20 w-1 h-1 bg-white rounded-full opacity-30 animate-pulse" style={{ animationDelay: '0.5s' }} />
+          <div className="absolute top-60 left-1/4 w-1.5 h-1.5 bg-cosmic-cyan rounded-full opacity-40 animate-pulse" style={{ animationDelay: '1s' }} />
+          <div className="absolute bottom-40 right-1/3 w-2 h-2 bg-cosmic-pink rounded-full opacity-30 animate-pulse" style={{ animationDelay: '1.5s' }} />
+          <div className="absolute bottom-20 left-1/3 w-1 h-1 bg-white rounded-full opacity-50 animate-pulse" style={{ animationDelay: '2s' }} />
+        </div>
+
+        <div className="relative w-full max-w-md">
+          {/* Logo at top center */}
+          <div className="text-center mb-6">
+            <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full glass-card">
+              <Rocket className="w-5 h-5 text-cosmic-cyan" />
+              <span className="text-cosmic-cyan font-medium tracking-wider">PLAYHARDER</span>
+            </div>
+          </div>
+
+          {/* Floating verification box */}
+          <div className="glass-card rounded-2xl p-8 space-y-6">
+            <button
+              onClick={handleBackToCredentials}
+              className="flex items-center gap-2 text-gray-400 hover:text-white transition-colors text-sm"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              Back
+            </button>
+
+            <div className="text-center">
+              <h2 className="text-2xl font-bold text-white mb-2">Verify Your Email</h2>
+              <p className="text-gray-400 text-sm">
+                We sent a 6-digit code to<br />
+                <span className="text-cosmic-cyan">{formData.email}</span>
+              </p>
+            </div>
+
+            {/* 6 OTP Input Boxes */}
+            <div className="flex justify-center gap-3">
+              {otpCode.map((digit, index) => (
+                <input
+                  key={index}
+                  ref={(el) => { otpInputRefs.current[index] = el }}
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={1}
+                  value={digit}
+                  onChange={(e) => handleOtpChange(index, e.target.value)}
+                  onKeyDown={(e) => handleOtpKeyDown(index, e)}
+                  onPaste={handleOtpPaste}
+                  className="w-12 h-14 text-center text-2xl font-bold bg-cosmic-darker border-2 border-cosmic-purple/50 rounded-lg text-white focus:border-cosmic-cyan focus:outline-none transition-colors"
+                />
+              ))}
+            </div>
+
+            {/* Verify Button */}
+            <Button
+              onClick={handleVerifyOtp}
+              disabled={isLoading || otpCode.join('').length !== 6}
+              className="w-full cosmic-button text-white font-bold py-3 rounded-xl flex items-center justify-center gap-2"
+            >
+              {isLoading ? (
+                <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              ) : (
+                <>
+                  <Rocket className="w-5 h-5" />
+                  VERIFY
+                </>
+              )}
+            </Button>
+
+            {/* Resend Code */}
+            <p className="text-center text-gray-400 text-sm">
+              Didn't receive the code?{' '}
+              <button
+                onClick={handleResendOtp}
+                disabled={isLoading}
+                className="text-cosmic-cyan hover:text-cosmic-pink transition-colors"
+              >
+                Resend Code
+              </button>
+            </p>
+          </div>
+        </div>
+      </div>
+    )
   }
 
   return (
