@@ -5,6 +5,11 @@ import type { Address, Package, ShippingRate, ShipmentRequest, ShippoAddress, Sh
 const SHIPPO_API_KEY = Deno.env.get('SHIPPO_API_KEY') || Deno.env.get('VITE_SHIPPO_API_KEY')
 const SHIPPO_API_URL = 'https://api.goshippo.com'
 
+// FedEx API Configuration
+const FEDEX_API_KEY = Deno.env.get('FEDEX_API_KEY')
+const FEDEX_SECRET_KEY = Deno.env.get('FEDEX_SECRET_KEY')
+const FEDEX_API_URL = Deno.env.get('FEDEX_API_URL') || 'https://apis-sandbox.fedex.com' // Use sandbox by default
+
 function convertToShippoAddress(address: Address): ShippoAddress {
   return {
     name: address.contactName || 'Customer',
@@ -96,6 +101,169 @@ function getDeliveryDate(days: number): string {
   return date.toISOString().split('T')[0]
 }
 
+// FedEx OAuth Token Cache
+let fedexAccessToken: string | null = null
+let fedexTokenExpiry: number = 0
+
+async function getFedExAccessToken(): Promise<string> {
+  // Return cached token if still valid (with 5 min buffer)
+  if (fedexAccessToken && Date.now() < fedexTokenExpiry - 300000) {
+    return fedexAccessToken
+  }
+
+  const response = await fetch(`${FEDEX_API_URL}/oauth/token`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({
+      grant_type: 'client_credentials',
+      client_id: FEDEX_API_KEY || '',
+      client_secret: FEDEX_SECRET_KEY || '',
+    }),
+  })
+
+  if (!response.ok) {
+    const errorText = await response.text()
+    console.error('FedEx OAuth error:', errorText)
+    throw new Error(`FedEx OAuth error: ${response.status}`)
+  }
+
+  const data = await response.json()
+  fedexAccessToken = data.access_token
+  fedexTokenExpiry = Date.now() + (data.expires_in * 1000)
+  
+  return fedexAccessToken
+}
+
+interface FedExAddress {
+  streetLines: string[]
+  city: string
+  stateOrProvinceCode: string
+  postalCode: string
+  countryCode: string
+}
+
+function convertToFedExAddress(address: Address): FedExAddress {
+  return {
+    streetLines: [address.street],
+    city: address.city,
+    stateOrProvinceCode: address.state,
+    postalCode: address.postalCode,
+    countryCode: address.country || 'US',
+  }
+}
+
+interface FedExRateReply {
+  rateReplyDetails: Array<{
+    serviceType: string
+    serviceName: string
+    ratedShipmentDetails: Array<{
+      totalNetCharge: number
+      currency: string
+    }>
+    commit?: {
+      dateDetail?: {
+        dayOfWeek: string
+        dayCxsFormat: string
+      }
+    }
+    operationalDetail?: {
+      transitTime?: string
+    }
+  }>
+}
+
+async function getFedExRates(request: ShipmentRequest): Promise<ShippingRate[]> {
+  const accessToken = await getFedExAccessToken()
+  
+  const requestBody = {
+    accountNumber: {
+      value: Deno.env.get('FEDEX_ACCOUNT_NUMBER') || '',
+    },
+    requestedShipment: {
+      shipper: {
+        address: convertToFedExAddress(request.origin),
+      },
+      recipient: {
+        address: convertToFedExAddress(request.destination),
+      },
+      pickupType: 'DROPOFF_AT_FEDEX_LOCATION',
+      rateRequestType: ['LIST', 'ACCOUNT'],
+      requestedPackageLineItems: request.packages.map(pkg => ({
+        weight: {
+          units: 'LB',
+          value: pkg.weight,
+        },
+        dimensions: {
+          length: pkg.length,
+          width: pkg.width,
+          height: pkg.height,
+          units: 'IN',
+        },
+      })),
+    },
+  }
+
+  const response = await fetch(`${FEDEX_API_URL}/rate/v1/rates/quotes`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+      'X-locale': 'en_US',
+    },
+    body: JSON.stringify(requestBody),
+  })
+
+  if (!response.ok) {
+    const errorText = await response.text()
+    console.error('FedEx Rate API error:', errorText)
+    throw new Error(`FedEx Rate API error: ${response.status}`)
+  }
+
+  const data: { output: FedExRateReply } = await response.json()
+  
+  if (!data.output?.rateReplyDetails) {
+    return []
+  }
+
+  const rates: ShippingRate[] = data.output.rateReplyDetails.map((rate, index) => {
+    const ratedDetails = rate.ratedShipmentDetails?.[0]
+    const transitDays = getTransitDays(rate.operationalDetail?.transitTime)
+    
+    return {
+      id: `fedex-${rate.serviceType}-${index}`,
+      carrier: 'FedEx',
+      carrierCode: 'fedex',
+      serviceName: rate.serviceName || rate.serviceType,
+      serviceType: rate.serviceType,
+      rate: ratedDetails?.totalNetCharge || 0,
+      currency: ratedDetails?.currency || 'USD',
+      estimatedDays: transitDays,
+      deliveryDate: rate.commit?.dateDetail?.dayCxsFormat || getDeliveryDate(transitDays),
+      source: 'fedex_direct', // Mark as direct FedEx API
+    }
+  })
+
+  return rates.filter(r => r.rate > 0).sort((a, b) => a.rate - b.rate)
+}
+
+function getTransitDays(transitTime?: string): number {
+  if (!transitTime) return 5
+  
+  const transitMap: Record<string, number> = {
+    'ONE_DAY': 1,
+    'TWO_DAYS': 2,
+    'THREE_DAYS': 3,
+    'FOUR_DAYS': 4,
+    'FIVE_DAYS': 5,
+    'SIX_DAYS': 6,
+    'SEVEN_DAYS': 7,
+  }
+  
+  return transitMap[transitTime] || 5
+}
+
 // Mock rates for development/testing when Shippo is unavailable
 function getMockRates(request: ShipmentRequest): ShippingRate[] {
   const baseWeight = request.packages.reduce((sum, pkg) => sum + pkg.weight, 0)
@@ -154,22 +322,60 @@ Deno.serve(async (req: Request) => {
       )
     }
 
-    let rates: ShippingRate[]
-
+    // Collect rates from all available carriers in parallel
+    const ratePromises: Promise<ShippingRate[]>[] = []
+    
+    // Try FedEx direct API first (preferred)
+    if (FEDEX_API_KEY && FEDEX_SECRET_KEY) {
+      ratePromises.push(
+        getFedExRates(request).catch(error => {
+          console.error('FedEx API error:', error)
+          return [] // Return empty array on error
+        })
+      )
+    }
+    
+    // Also try Shippo for other carriers (UPS, USPS, DHL)
     if (SHIPPO_API_KEY) {
-      try {
-        rates = await getShippoRates(request)
-      } catch (error) {
-        console.error('Shippo error, falling back to mock rates:', error)
-        rates = getMockRates(request)
-      }
-    } else {
-      console.log('No Shippo API key, using mock rates')
-      rates = getMockRates(request)
+      ratePromises.push(
+        getShippoRates(request).catch(error => {
+          console.error('Shippo API error:', error)
+          return [] // Return empty array on error
+        })
+      )
     }
 
+    let allRates: ShippingRate[] = []
+    
+    if (ratePromises.length > 0) {
+      const results = await Promise.all(ratePromises)
+      allRates = results.flat()
+      
+      // Deduplicate FedEx rates (prefer direct API over Shippo)
+      const seenServices = new Set<string>()
+      allRates = allRates.filter(rate => {
+        // For FedEx, prefer direct API rates (marked with source: 'fedex_direct')
+        const key = `${rate.carrierCode}-${rate.serviceType}`
+        if (seenServices.has(key)) {
+          // If we already have this service, only keep if it's from direct API
+          return (rate as { source?: string }).source === 'fedex_direct'
+        }
+        seenServices.add(key)
+        return true
+      })
+    }
+    
+    // Fall back to mock rates if no real rates available
+    if (allRates.length === 0) {
+      console.log('No carrier APIs available, using mock rates')
+      allRates = getMockRates(request)
+    }
+
+    // Sort by price
+    allRates.sort((a, b) => a.rate - b.rate)
+
     return new Response(
-      JSON.stringify({ rates }),
+      JSON.stringify({ rates: allRates }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
   } catch (error) {
