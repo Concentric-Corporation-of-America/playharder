@@ -1,5 +1,8 @@
 import { supabase } from '@/lib/supabase'
 
+// Markup per shipment (one-way) - $25 per way, $50 roundtrip
+const SHIPPING_MARKUP_PER_WAY = 25
+
 export interface Address {
   street: string
   city: string
@@ -47,6 +50,14 @@ export interface ShipmentResponse {
   estimatedDelivery: string
 }
 
+// Apply markup to shipping rates ($25 per way)
+function applyMarkup(rates: ShippingRate[]): ShippingRate[] {
+  return rates.map(rate => ({
+    ...rate,
+    rate: Number((rate.rate + SHIPPING_MARKUP_PER_WAY).toFixed(2))
+  }))
+}
+
 // Get shipping rates from FedEx only
 export async function getShippingRates(request: ShipmentRequest): Promise<ShippingRate[]> {
   try {
@@ -60,11 +71,13 @@ export async function getShippingRates(request: ShipmentRequest): Promise<Shippi
     const fedexRates = allRates.filter((rate: ShippingRate) => 
       rate.carrierCode === 'fedex' || rate.carrier?.toLowerCase().includes('fedex')
     )
-    return fedexRates.length > 0 ? fedexRates : getMockRates(request)
+    // Apply $25 markup per way to all rates
+    const ratesWithMarkup = applyMarkup(fedexRates.length > 0 ? fedexRates : getMockRates(request))
+    return ratesWithMarkup
   } catch (error) {
     console.error('Error fetching shipping rates:', error)
-    // Return mock FedEx rates for development
-    return getMockRates(request)
+    // Return mock FedEx rates for development with markup
+    return applyMarkup(getMockRates(request))
   }
 }
 
