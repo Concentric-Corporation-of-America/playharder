@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { MapPin, CreditCard, Truck, ArrowLeft, Printer, CheckCircle } from 'lucide-react'
+import { MapPin, CreditCard, Truck, ArrowLeft, Printer, CheckCircle, Shield, Tag } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { toast } from 'sonner'
@@ -11,9 +11,16 @@ import {
   createShipment,
   getWeightFromRange,
   getGolfBagDimensions,
+  getPricingConfig,
+  getInsuranceOptions,
+  validatePromoCode,
+  calculateDiscount,
   type ShippingRate,
   type ShipmentRequest,
-  type ShipmentResponse
+  type ShipmentResponse,
+  type PricingConfig,
+  type InsuranceOption,
+  type PromoCode
 } from '@/services/shippingService'
 
 // Re-export ParsedAddress type for use in callbacks
@@ -65,6 +72,14 @@ export default function CheckoutPage() {
   const [rates, setRates] = useState<ShippingRate[]>([])
   const [selectedRate, setSelectedRate] = useState<ShippingRate | null>(null)
   
+  // Pricing state
+  const [pricingConfig, setPricingConfig] = useState<PricingConfig | null>(null)
+  const [_insuranceOptions, setInsuranceOptions] = useState<InsuranceOption[]>([])
+  const [selectedInsurance, setSelectedInsurance] = useState<InsuranceOption | null>(null)
+  const [promoCodeInput, setPromoCodeInput] = useState('')
+  const [appliedPromo, setAppliedPromo] = useState<PromoCode | null>(null)
+  const [isValidatingPromo, setIsValidatingPromo] = useState(false)
+  
   // Payment state
   const [cardNumber, setCardNumber] = useState('')
   const [cardExpiry, setCardExpiry] = useState('')
@@ -77,15 +92,26 @@ export default function CheckoutPage() {
   // User email for notifications
   const [userEmail, setUserEmail] = useState<string | null>(null)
   
-  // Get user email on mount
+  // Get user email and pricing config on mount
   useEffect(() => {
-    const getUserEmail = async () => {
+    const initializeData = async () => {
       const { data: { user } } = await supabase.auth.getUser()
       if (user?.email) {
         setUserEmail(user.email)
       }
+      
+      const [config, insurance] = await Promise.all([
+        getPricingConfig(),
+        getInsuranceOptions()
+      ])
+      setPricingConfig(config)
+      setInsuranceOptions(insurance)
+      const complimentary = insurance.find(opt => opt.isComplimentary)
+      if (complimentary) {
+        setSelectedInsurance(complimentary)
+      }
     }
-    getUserEmail()
+    initializeData()
   }, [])
   
   // Send order confirmation email
@@ -302,6 +328,43 @@ export default function CheckoutPage() {
     }
   }
 
+  // Handle promo code validation
+  const handleApplyPromoCode = async () => {
+    if (!promoCodeInput.trim()) {
+      toast.error('Please enter a promo code')
+      return
+    }
+    
+    setIsValidatingPromo(true)
+    try {
+      const promo = await validatePromoCode(promoCodeInput.trim())
+      if (promo) {
+        setAppliedPromo(promo)
+        toast.success(`Promo code "${promo.code}" applied! ${promo.description}`)
+      } else {
+        toast.error('Invalid or expired promo code')
+      }
+    } catch {
+      toast.error('Failed to validate promo code')
+    } finally {
+      setIsValidatingPromo(false)
+    }
+  }
+
+  // Calculate total price with discount
+  const calculateTotal = () => {
+    if (!selectedRate) return 0
+    const subtotal = selectedRate.rate
+    const discount = calculateDiscount(subtotal, appliedPromo)
+    return Number((subtotal - discount).toFixed(2))
+  }
+
+  // Get discount amount
+  const getDiscountAmount = () => {
+    if (!selectedRate || !appliedPromo) return 0
+    return calculateDiscount(selectedRate.rate, appliedPromo)
+  }
+
   return (
     <div className="min-h-screen py-10 px-4">
       <div className="max-w-3xl mx-auto">
@@ -416,6 +479,15 @@ export default function CheckoutPage() {
               Select Shipping Option
             </h2>
 
+            {pricingConfig?.insuranceMessaging.enabled && (
+              <div className="flex items-center gap-2 bg-cosmic-purple/20 rounded-lg p-3 border border-cosmic-purple/30">
+                <Shield className="w-5 h-5 text-cosmic-cyan flex-shrink-0" />
+                <span className="text-sm text-gray-300">
+                  {pricingConfig.insuranceMessaging.message}
+                </span>
+              </div>
+            )}
+
             <div className="space-y-3">
               {rates.map((rate) => (
                 <button
@@ -439,6 +511,11 @@ export default function CheckoutPage() {
                         Estimated delivery: {rate.estimatedDays} day{rate.estimatedDays > 1 ? 's' : ''}
                         {rate.deliveryDate && ` (${rate.deliveryDate})`}
                       </p>
+                      {pricingConfig?.showPriceBreakdown && (
+                        <p className="text-gray-500 text-xs mt-1">
+                          Carrier ${rate.baseRate?.toFixed(2) || '0.00'} + Service ${rate.serviceFee?.toFixed(2) || '0.00'}
+                        </p>
+                      )}
                     </div>
                     <div className="text-right">
                       <span className="text-2xl font-bold text-white">
@@ -477,16 +554,87 @@ export default function CheckoutPage() {
               Payment Details
             </h2>
 
-            {/* Order Summary */}
+            {/* Order Summary with Price Breakdown */}
             <div className="bg-cosmic-darker rounded-xl p-4 space-y-2">
               <div className="flex justify-between text-gray-400">
-                <span>Shipping ({selectedRate.carrier} {selectedRate.serviceName})</span>
+                <span>{selectedRate.carrier} {selectedRate.serviceName}</span>
+              </div>
+              {pricingConfig?.showPriceBreakdown && (
+                <>
+                  <div className="flex justify-between text-gray-500 text-sm">
+                    <span>Carrier Rate</span>
+                    <span>${selectedRate.baseRate?.toFixed(2) || '0.00'}</span>
+                  </div>
+                  <div className="flex justify-between text-gray-500 text-sm">
+                    <span>Service Fee</span>
+                    <span>${selectedRate.serviceFee?.toFixed(2) || '0.00'}</span>
+                  </div>
+                </>
+              )}
+              <div className="flex justify-between text-gray-400">
+                <span>Subtotal</span>
                 <span>${selectedRate.rate.toFixed(2)}</span>
               </div>
+              {appliedPromo && (
+                <div className="flex justify-between text-green-400">
+                  <span className="flex items-center gap-1">
+                    <Tag className="w-3 h-3" />
+                    {appliedPromo.code}
+                  </span>
+                  <span>-${getDiscountAmount().toFixed(2)}</span>
+                </div>
+              )}
+              {pricingConfig?.insuranceMessaging.enabled && selectedInsurance && (
+                <div className="flex justify-between text-gray-500 text-sm">
+                  <span className="flex items-center gap-1">
+                    <Shield className="w-3 h-3" />
+                    {selectedInsurance.name}
+                  </span>
+                  <span>{selectedInsurance.isComplimentary ? 'Included' : `$${selectedInsurance.premiumFixed.toFixed(2)}`}</span>
+                </div>
+              )}
               <div className="flex justify-between text-white font-bold text-lg pt-2 border-t border-cosmic-purple/30">
                 <span>Total</span>
-                <span className="text-cosmic-cyan">${selectedRate.rate.toFixed(2)}</span>
+                <span className="text-cosmic-cyan">${calculateTotal().toFixed(2)}</span>
               </div>
+            </div>
+
+            {/* Promo Code Input */}
+            <div className="space-y-2">
+              <label className="text-sm text-gray-400">Have a promo code?</label>
+              <div className="flex gap-2">
+                <Input
+                  placeholder="Enter code"
+                  value={promoCodeInput}
+                  onChange={(e) => setPromoCodeInput(e.target.value.toUpperCase())}
+                  disabled={!!appliedPromo}
+                  className="bg-cosmic-darker border-cosmic-purple/30 text-white placeholder:text-gray-500 flex-1"
+                />
+                {appliedPromo ? (
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setAppliedPromo(null)
+                      setPromoCodeInput('')
+                    }}
+                    className="border-red-500/30 text-red-400 hover:bg-red-500/20"
+                  >
+                    Remove
+                  </Button>
+                ) : (
+                  <Button
+                    variant="outline"
+                    onClick={handleApplyPromoCode}
+                    disabled={isValidatingPromo || !promoCodeInput.trim()}
+                    className="border-cosmic-purple/30 text-cosmic-cyan hover:bg-cosmic-purple/20"
+                  >
+                    {isValidatingPromo ? 'Checking...' : 'Apply'}
+                  </Button>
+                )}
+              </div>
+              {appliedPromo && (
+                <p className="text-xs text-green-400">{appliedPromo.description}</p>
+              )}
             </div>
 
             {/* Card Form */}
@@ -542,7 +690,7 @@ export default function CheckoutPage() {
                 disabled={isLoading}
                 className="flex-1 cosmic-button text-white font-bold"
               >
-                {isLoading ? 'Processing...' : `Pay $${selectedRate.rate.toFixed(2)}`}
+                {isLoading ? 'Processing...' : `Pay $${calculateTotal().toFixed(2)}`}
               </Button>
             </div>
           </div>
